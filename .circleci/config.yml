@@ -4,9 +4,11 @@ commands:
     steps:
     - run: 
         name: Configure environment
+        environment:
+          KOPS_STATE: rmit-kops-state-5dgbn0
         command: |
           # install terraform
-          curl -o terraform.zip https://releases.hashicorp.com/terraform/0.12.21/terraform_0.12.21_linux_amd64.zip
+          curl -o terraform.zip https://releases.hashicorp.com/terraform/0.12.24/terraform_0.12.24_linux_amd64.zip
           sudo unzip terraform.zip -d /usr/local/bin/
           
           # install helm
@@ -21,7 +23,8 @@ commands:
           curl -LO https://github.com/kubernetes/kops/releases/download/$(curl -s https://api.github.com/repos/kubernetes/kops/releases/latest | grep tag_name | cut -d '"' -f 4)/kops-linux-amd64
           chmod +x kops-linux-amd64
           sudo mv kops-linux-amd64 /usr/local/bin/kops
-          kops export kubecfg rmit.k8s.local --state s3://rmit-kops-state-7zlvq0
+          kops export kubecfg rmit.k8s.local --state s3://${KOPS_STATE}
+
 
 
 jobs:
@@ -43,6 +46,85 @@ jobs:
       
       - store_test_results:
           path: src/test-results
+  
+
+  
+
+  deploy-test:
+    docker:
+      - image: cimg/base:2020.01
+    environment:
+      ENV: test
+    steps:
+      - attach_workspace:
+          at: ./
+
+      - setup-cd
+    
+   
+      - run:
+          name: deploy infra
+          command: |
+            cd artifacts/infra
+            make init
+            make up
+            terraform output endpoint > ../dbhost.txt      
+      - run:
+          name: deploy appto test environment
+          command: |
+            helm upgrade sdo-app artifacts/sdo-app.tgz -i -n test --wait --set image=$(cat artifacts/image.txt),dbhost=$(cat artifacts/dbhost.txt)
+            kubectl get deployment -n test
+            kubectl get service -n test sdo-app -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}' > ./artifacts/endpoint.txt
+      
+      - run: 
+          name: wait for HELM 
+          command: |
+            sleep 10
+
+      - run:
+          name: migrate db
+          command: |
+            kubectl exec deployment/sdo-app -n test -- node_modules/.bin/sequelize db:migrate
+      
+      - persist_to_workspace:
+          root: ./
+          paths:
+            - artifacts
+            
+
+  deploy-prod:
+    docker:
+      - image: cimg/base:2020.01
+    environment:
+      ENV: prod
+    steps:
+      - attach_workspace:
+          at: ./
+
+      - setup-cd
+
+      - run:
+          name: deploy infra
+          command: |
+            cd artifacts/infra
+            make init
+            make up
+            terraform output endpoint > ../dbhost.txt
+      
+      - run:
+          name: deploy application
+          command: |
+            helm upgrade sdo-app artifacts/sdo-app.tgz -i -n prod --wait --set image=$(cat artifacts/image.txt),dbhost=$(cat artifacts/dbhost.txt)
+      
+      - run: 
+          name: wait for HELM 
+          command: |
+            sleep 10
+
+      - run:
+          name: run migration script
+          command: |
+            kubectl exec deployment/sdo-app -n prod -- node_modules/.bin/sequelize db:migrate
 
   integration:
     docker:
@@ -76,46 +158,40 @@ jobs:
           path: src/test-results
   
   e2e:
-    docker:
+    docker: 
       - image: qawolf/qawolf:v0.9.2
-      - image: postgres:10.7
-        environment:
-          POSTGRES_PASSWORD: password
     environment:
       QAW_HEADLESS: true
       DB_USERNAME: postgres
       DB_PASSWORD: password
       DB_NAME: servian
-      DB_HOSTNAME: localhost
 
     steps: 
       - checkout
 
-      - run:
-          name: set up environment
+      - attach_workspace:
+          at: ./
+
+      - run: 
+          name: set up
           command: |
             cd src
-            npm install 
-            apt update
-            apt install postgresql-client-10 -y
-            
-            psql -h localhost -U postgres -c "CREATE DATABASE servian;"
-
+            npm install
       - run: 
           name: End 2 end tests
           no_output_timeout: 2m
           command: |
+            export DB_HOSTNAME=$(cat artifacts/dbhost.txt)
+            export ENDPOINT=http://$(cat artifacts/endpoint.txt)
             cd src
-
-            npm run start:prod & 
-            npx wait-on http://localhost:3000
-            
+            echo ${ENDPOINT}
+            npx wait-on ${ENDPOINT}
             npm run test-e2e
 
   package:
     machine: true
     environment:
-      ECR: <insert>
+      ECR: 104363569144.dkr.ecr.us-east-1.amazonaws.com/app
       reponame: app
       NODE_ENV: production
     steps:
@@ -147,8 +223,9 @@ jobs:
       - run:
           name: Package helm
           command: | 
-
-            #helm package helm/acme --app-version ${CIRCLE_SHA1} -d artifacts
+            cd helm
+            helm package sdo-app --app-version ${CIRCLE_SHA1}
+            mv sdo-app-0.1.0.tgz ../artifacts/sdo-app.tgz
       - run:
           name: Package infra
           command: |
@@ -158,7 +235,7 @@ jobs:
           root: ./
           paths:
             - artifacts
-
+  
 
 
 workflows:
@@ -171,11 +248,20 @@ workflows:
             - build
       - e2e:
           requires:
-            - build
+            - deploy-test
       - package:
           requires:
-            - e2e
             - integration
           filters:
             branches:
               only: master
+      - deploy-test:
+          requires:
+            - package
+      - approval:
+          type: approval
+          requires:
+            - e2e
+      - deploy-prod:
+          requires:
+            - approval

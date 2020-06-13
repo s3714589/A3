@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: "sdo-app"
+spec:
+    selector:
+        matchLabels:
+            app: "sdo-app"
+    replicas: 5
+    template:
+        metadata:
+            labels:
+                app: "sdo-app"
+        spec:
+            containers:
+            - image: {{ .Values.image }}
+              imagePullPolicy: Always
+              name: "sdo-app"
+              env:
+                - name: DB_HOSTNAME
+                  value: {{ .Values.dbhost }}
+                - name: DB_USERNAME
+                  value: postgres
+                - name: DB_PASSWORD
+                  value: password
+                - name: DB_NAME
+                  value: servian
+              ports:
+              - containerPort: 3000
