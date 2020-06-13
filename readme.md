@@ -65,4 +65,6 @@ environment:
 * Successful pipeline:
 <img src="/img/prod.png"></image>
 ### Integrate logging to the solution so any logs from the Kubernetes cluster is automatically stored in AWS CloudWatch for the future
-<img src="/img/cloud.png"></image>
+<img src="/img/cloud.png"></image>  
+The code I use to deploy the logging solution to the cluster in file fluentd.yaml
+
